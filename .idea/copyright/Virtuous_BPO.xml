@@ -1,0 +1,6 @@
+<component name="CopyrightManager">
+  <copyright>
+    <option name="notice" value="Copyright (c) &amp;#36;{YEAR} Virtuous BPO Software Projects&#10; &#10; All rights reserved.&#10; &#10; This software and associated documentation files (the &quot;Software&quot;) are proprietary to Virtuous BPO Software Projects and are protected by copyright law and international treaty provisions. Unauthorized reproduction or distribution of this Software, or any portion of it, may result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.&#10; &#10;RESTRICTED RIGHTS: Use, duplication, or disclosure by the government is subject to restrictions as set forth in subparagraph (c)(1)(ii) of the Rights in Technical Data and Computer Software clause at DFARS 252.227-7013 or subparagraphs (c)(1) and (2) of the Commercial Computer Software-Restricted Rights clause at FAR 52.227-19, as applicable.&#10;&#10; * Contact: info@virtuousbpo.com&#10; * Website: www.virtuousbpo.com&#10; &#10; * Project: &amp;#36;{PROJECT_NAME}&#10; * File: &amp;#36;{FILE_NAME}&#10; * Created: &amp;#36;{DATE}&#10; * Author: &amp;#36;{USER}" />
+    <option name="myName" value="Virtuous BPO" />
+  </copyright>
+</component>
