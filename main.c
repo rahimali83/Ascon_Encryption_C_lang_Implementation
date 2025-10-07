@@ -135,7 +135,6 @@ static inline void ascon_permutation(ascon_state_t* state, int rounds) {
     state->x[3] = x3; state->x[4] = x4;
 }
 
-
 /**
  * @brief Computes the Ascon-Hash256 digest of a message.
  * @param msg Pointer to the input message bytes.
