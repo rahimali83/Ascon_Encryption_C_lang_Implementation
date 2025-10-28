@@ -47,6 +47,30 @@ void ascon_hash256_update(ascon_hash256_ctx* ctx, const uint8_t* data, size_t le
 // Finalize and write 32-byte digest; context is wiped
 void ascon_hash256_final(ascon_hash256_ctx* ctx, uint8_t out[32]);
 
+// Streaming HASH (Ascon-Hash) API
+typedef struct {
+    ascon_state_t st;
+    uint8_t buf[8];
+    size_t buf_len;
+    int finalized;
+} ascon_hash_ctx;
+
+void ascon_hash_init(ascon_hash_ctx* ctx);
+void ascon_hash_update(ascon_hash_ctx* ctx, const uint8_t* data, size_t len);
+void ascon_hash_final(ascon_hash_ctx* ctx, uint8_t out[32]);
+
+// Streaming HASHa (Ascon-Hasha) API
+typedef struct {
+    ascon_state_t st;
+    uint8_t buf[8];
+    size_t buf_len;
+    int finalized;
+} ascon_hasha_ctx;
+
+void ascon_hasha_init(ascon_hasha_ctx* ctx);
+void ascon_hasha_update(ascon_hasha_ctx* ctx, const uint8_t* data, size_t len);
+void ascon_hasha_final(ascon_hasha_ctx* ctx, uint8_t out[32]);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
