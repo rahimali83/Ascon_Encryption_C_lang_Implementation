@@ -27,15 +27,25 @@
 extern "C" {
 #endif
 
-//TODO One-shot APIs produce 32-byte digest for HASH/HASHa/HASH256
+// One-shot APIs produce 32-byte digest for HASH/HASHa/HASH256
 void ascon_hash256(const uint8_t* msg, size_t msg_len, uint8_t* digest);
-
-//TODO Placeholders for future variants (to be implemented)
 void ascon_hash(const uint8_t* msg, size_t msg_len, uint8_t* digest);
-
-//TODO Placeholders for future variants (to be implemented)
 void ascon_hasha(const uint8_t* msg, size_t msg_len, uint8_t* digest);
 
+// Streaming Hash-256 API (incremental hashing)
+typedef struct {
+    ascon_state_t st;      // internal permutation state
+    uint8_t buf[8];        // absorb buffer (rate = 8 bytes)
+    size_t buf_len;        // number of bytes currently in buf
+    int finalized;         // set after final() is called
+} ascon_hash256_ctx;
+
+// Initialize context
+void ascon_hash256_init(ascon_hash256_ctx* ctx);
+// Absorb more message bytes (can be called many times)
+void ascon_hash256_update(ascon_hash256_ctx* ctx, const uint8_t* data, size_t len);
+// Finalize and write 32-byte digest; context is wiped
+void ascon_hash256_final(ascon_hash256_ctx* ctx, uint8_t out[32]);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -73,3 +73,74 @@ void ascon_hash(const uint8_t* msg, size_t msg_len, uint8_t* digest) {
 void ascon_hasha(const uint8_t* msg, size_t msg_len, uint8_t* digest) {
     ascon_hash_core(ASCON_HASHA_IV, msg, msg_len, digest);
 }
+
+// Streaming Hash-256 implementation
+void ascon_hash256_init(ascon_hash256_ctx* ctx) {
+    if (!ctx) return;
+    ctx->st.x[0] = ASCON_HASH256_IV;
+    ctx->st.x[1] = 0; ctx->st.x[2] = 0; ctx->st.x[3] = 0; ctx->st.x[4] = 0;
+    ascon_permute(&ctx->st, ASCON_HASH_PA_ROUNDS);
+    ctx->buf_len = 0;
+    ctx->finalized = 0;
+}
+
+void ascon_hash256_update(ascon_hash256_ctx* ctx, const uint8_t* data, size_t len) {
+    if (!ctx || ctx->finalized) return;
+    if (!data && len) return;
+    const uint8_t* p = data;
+    // Fill partial buffer first
+    if (ctx->buf_len) {
+        size_t need = (size_t)ASCON_HASH_RATE - ctx->buf_len;
+        size_t take = (len < need) ? len : need;
+        if (take) {
+            memcpy(ctx->buf + ctx->buf_len, p, take);
+            ctx->buf_len += take;
+            p += take; len -= take;
+        }
+        if (ctx->buf_len == (size_t)ASCON_HASH_RATE) {
+            uint64_t lane = ascon_load64(ctx->buf);
+            ctx->st.x[0] ^= lane;
+            ascon_permute(&ctx->st, ASCON_HASH_PA_ROUNDS);
+            ctx->buf_len = 0;
+        }
+    }
+    // Process full blocks directly
+    while (len >= (size_t)ASCON_HASH_RATE) {
+        uint64_t lane = ascon_load64(p);
+        ctx->st.x[0] ^= lane;
+        ascon_permute(&ctx->st, ASCON_HASH_PA_ROUNDS);
+        p += ASCON_HASH_RATE;
+        len -= ASCON_HASH_RATE;
+    }
+    // Buffer tail
+    if (len) {
+        memcpy(ctx->buf + ctx->buf_len, p, len);
+        ctx->buf_len += len;
+    }
+}
+
+void ascon_hash256_final(ascon_hash256_ctx* ctx, uint8_t out[32]) {
+    if (!ctx || ctx->finalized) {
+        if (ctx && out && ctx->finalized) {
+            // Do nothing if already finalized; out would be undefined.
+        }
+        return;
+    }
+    // Apply padding to remaining bytes in buffer and absorb
+    uint8_t lastb[ASCON_HASH_RATE] = {0};
+    if (ctx->buf_len) memcpy(lastb, ctx->buf, ctx->buf_len);
+    lastb[ctx->buf_len] = 0x80;
+    uint64_t lane = ascon_load64(lastb);
+    ctx->st.x[0] ^= lane;
+    ascon_permute(&ctx->st, ASCON_HASH_PA_ROUNDS);
+
+    // Squeeze 32 bytes
+    for (int i = 0; i < 4; ++i) {
+        ascon_store64(out + 8*i, ctx->st.x[0]);
+        if (i != 3) ascon_permute(&ctx->st, ASCON_HASH_PA_ROUNDS);
+    }
+
+    // Wipe
+    ascon_secure_wipe(ctx, sizeof(*ctx));
+    ctx->finalized = 1;
+}

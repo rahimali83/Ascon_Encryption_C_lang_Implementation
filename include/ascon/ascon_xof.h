@@ -32,6 +32,28 @@ extern "C" {
 int ascon_xof(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len);
 int ascon_xofa(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len);
 
+// Streaming XOF API (incremental absorb + multi-call squeeze)
+typedef struct {
+    ascon_state_t st;      // internal permutation state
+    uint8_t buf[8];        // absorb buffer (rate = 8 bytes)
+    size_t buf_len;        // bytes currently in buf
+    int absorbed_final;    // whether padding/finalization has been applied
+    int variant_a;         // 0 = XOF, 1 = XOFA (chooses IV)
+} ascon_xof_ctx;
+
+// Initialize context for ASCON-XOF (variant_a = 0) or ASCON-XOFa (variant_a = 1)
+void ascon_xof_init(ascon_xof_ctx* ctx);
+void ascon_xofa_init(ascon_xof_ctx* ctx);
+
+// Absorb more input (only valid before finalization)
+void ascon_xof_absorb(ascon_xof_ctx* ctx, const uint8_t* in, size_t in_len);
+
+// Finalize absorption (apply padding). Implicitly done on first squeeze if not called.
+void ascon_xof_finalize(ascon_xof_ctx* ctx);
+
+// Squeeze arbitrary number of bytes. Can be called multiple times after finalize.
+void ascon_xof_squeeze(ascon_xof_ctx* ctx, uint8_t* out, size_t out_len);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

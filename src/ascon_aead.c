@@ -534,3 +534,564 @@ int ascon80pq_decrypt(
     }
     return 0;
 }
+
+
+// ================= Incremental AEAD APIs (streaming) =================
+// Helpers for 8-byte rate variants (ASCON-128, ASCON-80pq)
+static void aead_absorb_ad_update_r8(ascon_state_t* st, uint8_t* ad_buf, size_t* ad_len,
+                                     const uint8_t* ad, size_t ad_in_len, int pb_rounds) {
+    const size_t RATE = 8;
+    const uint8_t* p = ad;
+    // Fill partial buffer
+    if (*ad_len) {
+        size_t need = RATE - *ad_len;
+        size_t take = (ad_in_len < need) ? ad_in_len : need;
+        if (take) {
+            memcpy(ad_buf + *ad_len, p, take);
+            *ad_len += take; p += take; ad_in_len -= take;
+        }
+        if (*ad_len == RATE) {
+            uint64_t lane = load64_be(ad_buf);
+            st->x[0] ^= lane;
+            ascon_permute(st, pb_rounds);
+            *ad_len = 0;
+        }
+    }
+    // Full blocks
+    while (ad_in_len >= RATE) {
+        uint64_t lane = load64_be(p);
+        st->x[0] ^= lane;
+        ascon_permute(st, pb_rounds);
+        p += RATE; ad_in_len -= RATE;
+    }
+    // Tail
+    if (ad_in_len) {
+        memcpy(ad_buf + *ad_len, p, ad_in_len);
+        *ad_len += ad_in_len;
+    }
+}
+
+static void aead_absorb_ad_finalize_r8(ascon_state_t* st, uint8_t* ad_buf, size_t* ad_len, int pb_rounds) {
+    const size_t RATE = 8;
+    uint8_t tmp[RATE] = {0};
+    if (*ad_len) memcpy(tmp, ad_buf, *ad_len);
+    tmp[*ad_len] = 0x80;
+    uint64_t lane = load64_be(tmp);
+    st->x[0] ^= lane;
+    ascon_permute(st, pb_rounds);
+    st->x[4] ^= 1ULL; // domain separation
+    ascon_secure_wipe(tmp, sizeof(tmp));
+    *ad_len = 0;
+}
+
+static void aead_encrypt_update_r8(ascon_state_t* st, uint8_t* msg_buf, size_t* msg_len,
+                                   const uint8_t* pt, size_t pt_len, uint8_t* ct, int pb_rounds) {
+    const size_t RATE = 8;
+    const uint8_t* p = pt; uint8_t* q = ct;
+    // Complete partial buffer if present
+    if (*msg_len) {
+        uint8_t lane_bytes[RATE];
+        store64_be(lane_bytes, st->x[0]);
+        size_t need = RATE - *msg_len;
+        size_t take = (pt_len < need) ? pt_len : need;
+        for (size_t i = 0; i < take; ++i) {
+            lane_bytes[*msg_len + i] ^= p[i];
+            q[i] = lane_bytes[*msg_len + i];
+        }
+        *msg_len += take; p += take; q += take; pt_len -= take;
+        if (*msg_len == RATE) {
+            st->x[0] = load64_be(lane_bytes);
+            ascon_permute(st, pb_rounds);
+            *msg_len = 0;
+        } else {
+            // still partial, save lane_bytes back into msg_buf
+            memcpy(msg_buf, lane_bytes, *msg_len);
+            ascon_secure_wipe(lane_bytes, sizeof(lane_bytes));
+            return;
+        }
+        ascon_secure_wipe(lane_bytes, sizeof(lane_bytes));
+    }
+    // Full blocks
+    while (pt_len >= RATE) {
+        uint64_t m = load64_be(p);
+        st->x[0] ^= m;
+        store64_be(q, st->x[0]);
+        ascon_permute(st, pb_rounds);
+        p += RATE; q += RATE; pt_len -= RATE;
+    }
+    // Tail: buffer
+    if (pt_len) {
+        uint8_t lane_bytes[RATE];
+        store64_be(lane_bytes, st->x[0]);
+        for (size_t i = 0; i < pt_len; ++i) {
+            lane_bytes[i] ^= p[i];
+            q[i] = lane_bytes[i];
+        }
+        memcpy(msg_buf, lane_bytes, pt_len);
+        *msg_len = pt_len;
+        ascon_secure_wipe(lane_bytes, sizeof(lane_bytes));
+    }
+}
+
+static void aead_encrypt_final_r8(ascon_state_t* st, const uint8_t* key, uint8_t* msg_buf, size_t* msg_len,
+                                  uint8_t tag[ASCON_TAG_BYTES]) {
+    const size_t RATE = 8;
+    if (*msg_len) {
+        uint8_t lane_bytes[RATE] = {0};
+        memcpy(lane_bytes, msg_buf, *msg_len);
+        lane_bytes[*msg_len] ^= 0x80;
+        st->x[0] = load64_be(lane_bytes);
+        ascon_secure_wipe(lane_bytes, sizeof(lane_bytes));
+        *msg_len = 0;
+    }
+    ascon_finalize(st, key, tag);
+}
+
+static void aead_decrypt_update_r8(ascon_state_t* st, uint8_t* msg_buf, size_t* msg_len,
+                                   const uint8_t* ct, size_t ct_len, uint8_t* pt, int pb_rounds) {
+    const size_t RATE = 8;
+    const uint8_t* p = ct; uint8_t* q = pt;
+
+    if (*msg_len) {
+        uint8_t lane_bytes[RATE];
+        store64_be(lane_bytes, st->x[0]);
+        size_t need = RATE - *msg_len;
+        size_t take = (ct_len < need) ? ct_len : need;
+        for (size_t i = 0; i < take; ++i) {
+            uint8_t cbi = p[i];
+            uint8_t mbi = lane_bytes[*msg_len + i] ^ cbi;
+            q[i] = mbi;
+            lane_bytes[*msg_len + i] = cbi; // state becomes ciphertext bytes
+        }
+        *msg_len += take; p += take; q += take; ct_len -= take;
+        if (*msg_len == RATE) {
+            st->x[0] = load64_be(lane_bytes);
+            ascon_permute(st, pb_rounds);
+            *msg_len = 0;
+        } else {
+            memcpy(msg_buf, lane_bytes, *msg_len);
+            ascon_secure_wipe(lane_bytes, sizeof(lane_bytes));
+            return;
+        }
+        ascon_secure_wipe(lane_bytes, sizeof(lane_bytes));
+    }
+
+    while (ct_len >= RATE) {
+        uint64_t c = load64_be(p);
+        uint64_t m = st->x[0] ^ c;
+        store64_be(q, m);
+        st->x[0] = c;
+        ascon_permute(st, pb_rounds);
+        p += RATE; q += RATE; ct_len -= RATE;
+    }
+
+    if (ct_len) {
+        uint8_t lane_bytes[RATE];
+        store64_be(lane_bytes, st->x[0]);
+        for (size_t i = 0; i < ct_len; ++i) {
+            uint8_t cbi = p[i];
+            uint8_t mbi = lane_bytes[i] ^ cbi;
+            q[i] = mbi;
+            lane_bytes[i] = cbi;
+        }
+        memcpy(msg_buf, lane_bytes, ct_len);
+        *msg_len = ct_len;
+        ascon_secure_wipe(lane_bytes, sizeof(lane_bytes));
+    }
+}
+
+static void aead_decrypt_final_r8(ascon_state_t* st, const uint8_t* key, uint8_t* msg_buf, size_t* msg_len) {
+    const size_t RATE = 8;
+    if (*msg_len) {
+        uint8_t lane_bytes[RATE] = {0};
+        memcpy(lane_bytes, msg_buf, *msg_len);
+        lane_bytes[*msg_len] ^= 0x80;
+        st->x[0] = load64_be(lane_bytes);
+        ascon_secure_wipe(lane_bytes, sizeof(lane_bytes));
+        *msg_len = 0;
+    }
+    (void)key; // key used in finalize step by caller
+}
+
+// Helpers for 16-byte rate variant (ASCON-128a)
+static void aead_absorb_ad_update_r16(ascon_state_t* st, uint8_t* ad_buf, size_t* ad_len,
+                                      const uint8_t* ad, size_t ad_in_len, int pb_rounds) {
+    const size_t RATE = 16;
+    const uint8_t* p = ad;
+    if (*ad_len) {
+        size_t need = RATE - *ad_len;
+        size_t take = (ad_in_len < need) ? ad_in_len : need;
+        if (take) { memcpy(ad_buf + *ad_len, p, take); *ad_len += take; p += take; ad_in_len -= take; }
+        if (*ad_len == RATE) {
+            uint64_t a0 = load64_be(ad_buf);
+            uint64_t a1 = load64_be(ad_buf + 8);
+            st->x[0] ^= a0; st->x[1] ^= a1;
+            ascon_permute(st, pb_rounds);
+            *ad_len = 0;
+        }
+    }
+    while (ad_in_len >= RATE) {
+        uint64_t a0 = load64_be(p);
+        uint64_t a1 = load64_be(p + 8);
+        st->x[0] ^= a0; st->x[1] ^= a1;
+        ascon_permute(st, pb_rounds);
+        p += RATE; ad_in_len -= RATE;
+    }
+    if (ad_in_len) { memcpy(ad_buf + *ad_len, p, ad_in_len); *ad_len += ad_in_len; }
+}
+
+static void aead_absorb_ad_finalize_r16(ascon_state_t* st, uint8_t* ad_buf, size_t* ad_len, int pb_rounds) {
+    uint8_t lane0[8]; uint8_t lane1[8];
+    store64_be(lane0, st->x[0]);
+    store64_be(lane1, st->x[1]);
+    if (*ad_len <= 8) {
+        for (size_t i = 0; i < *ad_len; ++i) lane0[i] ^= ad_buf[i];
+        lane0[*ad_len] ^= 0x80;
+    } else {
+        size_t r2 = *ad_len - 8;
+        for (size_t i = 0; i < 8; ++i) lane0[i] ^= ad_buf[i];
+        for (size_t i = 0; i < r2; ++i) lane1[i] ^= ad_buf[8 + i];
+        lane1[r2] ^= 0x80;
+    }
+    st->x[0] = load64_be(lane0);
+    st->x[1] = load64_be(lane1);
+    ascon_permute(st, pb_rounds);
+    st->x[4] ^= 1ULL;
+    ascon_secure_wipe(lane0, sizeof(lane0));
+    ascon_secure_wipe(lane1, sizeof(lane1));
+    *ad_len = 0;
+}
+
+static void aead_encrypt_update_r16(ascon_state_t* st, uint8_t* msg_buf, size_t* msg_len,
+                                    const uint8_t* pt, size_t pt_len, uint8_t* ct, int pb_rounds) {
+    const size_t RATE = 16;
+    const uint8_t* p = pt; uint8_t* q = ct;
+
+    if (*msg_len) {
+        uint8_t lane0[8]; uint8_t lane1[8];
+        store64_be(lane0, st->x[0]);
+        store64_be(lane1, st->x[1]);
+        size_t first = (*msg_len < 8) ? (8 - *msg_len) : 0; // bytes remaining in first lane before padding region
+        size_t avail0 = 8 - (*msg_len > 8 ? 8 : *msg_len);
+        size_t need = RATE - *msg_len;
+        size_t take = (pt_len < need) ? pt_len : need;
+        for (size_t i = 0; i < take && (*msg_len + i) < 8; ++i) {
+            lane0[*msg_len + i] ^= p[i];
+            q[i] = lane0[*msg_len + i];
+        }
+        for (size_t i = (8 > *msg_len ? (8 - *msg_len) : 0); i < take; ++i) {
+            size_t idx = *msg_len + i;
+            if (idx >= 8) {
+                size_t j = idx - 8;
+                lane1[j] ^= p[i];
+                q[i] = lane1[j];
+            }
+        }
+        *msg_len += take; p += take; q += take; pt_len -= take;
+        if (*msg_len == RATE) {
+            st->x[0] = load64_be(lane0);
+            st->x[1] = load64_be(lane1);
+            ascon_permute(st, pb_rounds);
+            *msg_len = 0;
+        } else {
+            // save partial
+            memcpy(msg_buf, lane0, (*msg_len > 8 ? 8 : *msg_len));
+            if (*msg_len > 8) memcpy(msg_buf + 8, lane1, *msg_len - 8);
+            ascon_secure_wipe(lane0, sizeof(lane0));
+            ascon_secure_wipe(lane1, sizeof(lane1));
+            return;
+        }
+        ascon_secure_wipe(lane0, sizeof(lane0));
+        ascon_secure_wipe(lane1, sizeof(lane1));
+    }
+
+    while (pt_len >= RATE) {
+        uint64_t m0 = load64_be(p);
+        uint64_t m1 = load64_be(p + 8);
+        st->x[0] ^= m0; st->x[1] ^= m1;
+        store64_be(q, st->x[0]);
+        store64_be(q + 8, st->x[1]);
+        ascon_permute(st, pb_rounds);
+        p += RATE; q += RATE; pt_len -= RATE;
+    }
+
+    if (pt_len) {
+        uint8_t lane0[8]; uint8_t lane1[8];
+        store64_be(lane0, st->x[0]);
+        store64_be(lane1, st->x[1]);
+        size_t first = pt_len > 8 ? 8 : pt_len;
+        for (size_t i = 0; i < first; ++i) { lane0[i] ^= p[i]; q[i] = lane0[i]; }
+        if (pt_len > 8) {
+            size_t r2 = pt_len - 8;
+            for (size_t i = 0; i < r2; ++i) { lane1[i] ^= p[8 + i]; q[8 + i] = lane1[i]; }
+        }
+        memcpy(msg_buf, lane0, (pt_len > 8 ? 8 : pt_len));
+        if (pt_len > 8) memcpy(msg_buf + 8, lane1, pt_len - 8);
+        *msg_len = pt_len;
+        ascon_secure_wipe(lane0, sizeof(lane0));
+        ascon_secure_wipe(lane1, sizeof(lane1));
+    }
+}
+
+static void aead_encrypt_final_r16(ascon_state_t* st, const uint8_t* key, uint8_t* msg_buf, size_t* msg_len,
+                                   uint8_t tag[ASCON_TAG_BYTES]) {
+    if (*msg_len) {
+        uint8_t lane0[8] = {0}; uint8_t lane1[8] = {0};
+        if (*msg_len <= 8) {
+            memcpy(lane0, msg_buf, *msg_len);
+            lane0[*msg_len] ^= 0x80;
+        } else {
+            memcpy(lane0, msg_buf, 8);
+            size_t r2 = *msg_len - 8;
+            memcpy(lane1, msg_buf + 8, r2);
+            lane1[r2] ^= 0x80;
+        }
+        st->x[0] = load64_be(lane0);
+        st->x[1] = load64_be(lane1);
+        ascon_secure_wipe(lane0, sizeof(lane0));
+        ascon_secure_wipe(lane1, sizeof(lane1));
+        *msg_len = 0;
+    }
+    ascon_finalize(st, key, tag);
+}
+
+static void aead_decrypt_update_r16(ascon_state_t* st, uint8_t* msg_buf, size_t* msg_len,
+                                    const uint8_t* ct, size_t ct_len, uint8_t* pt, int pb_rounds) {
+    const size_t RATE = 16; const uint8_t* p = ct; uint8_t* q = pt;
+
+    if (*msg_len) {
+        uint8_t lane0[8]; uint8_t lane1[8];
+        store64_be(lane0, st->x[0]);
+        store64_be(lane1, st->x[1]);
+        size_t need = RATE - *msg_len;
+        size_t take = (ct_len < need) ? ct_len : need;
+        for (size_t i = 0; i < take && (*msg_len + i) < 8; ++i) {
+            uint8_t cbi = p[i];
+            uint8_t mbi = lane0[*msg_len + i] ^ cbi;
+            q[i] = mbi;
+            lane0[*msg_len + i] = cbi;
+        }
+        for (size_t i = (8 > *msg_len ? (8 - *msg_len) : 0); i < take; ++i) {
+            size_t idx = *msg_len + i;
+            if (idx >= 8) {
+                size_t j = idx - 8;
+                uint8_t cbi = p[i];
+                uint8_t mbi = lane1[j] ^ cbi;
+                q[i] = mbi;
+                lane1[j] = cbi;
+            }
+        }
+        *msg_len += take; p += take; q += take; ct_len -= take;
+        if (*msg_len == RATE) {
+            st->x[0] = load64_be(lane0);
+            st->x[1] = load64_be(lane1);
+            ascon_permute(st, pb_rounds);
+            *msg_len = 0;
+        } else {
+            memcpy(msg_buf, lane0, (*msg_len > 8 ? 8 : *msg_len));
+            if (*msg_len > 8) memcpy(msg_buf + 8, lane1, *msg_len - 8);
+            ascon_secure_wipe(lane0, sizeof(lane0));
+            ascon_secure_wipe(lane1, sizeof(lane1));
+            return;
+        }
+        ascon_secure_wipe(lane0, sizeof(lane0));
+        ascon_secure_wipe(lane1, sizeof(lane1));
+    }
+
+    while (ct_len >= RATE) {
+        uint64_t c0 = load64_be(p);
+        uint64_t c1 = load64_be(p + 8);
+        uint64_t m0 = st->x[0] ^ c0;
+        uint64_t m1 = st->x[1] ^ c1;
+        store64_be(q, m0); store64_be(q + 8, m1);
+        st->x[0] = c0; st->x[1] = c1;
+        ascon_permute(st, pb_rounds);
+        p += RATE; q += RATE; ct_len -= RATE;
+    }
+
+    if (ct_len) {
+        uint8_t lane0[8]; uint8_t lane1[8];
+        store64_be(lane0, st->x[0]);
+        store64_be(lane1, st->x[1]);
+        size_t first = ct_len > 8 ? 8 : ct_len;
+        for (size_t i = 0; i < first; ++i) { uint8_t cbi = p[i]; q[i] = lane0[i] ^ cbi; lane0[i] = cbi; }
+        if (ct_len > 8) {
+            size_t r2 = ct_len - 8;
+            for (size_t i = 0; i < r2; ++i) { uint8_t cbi = p[8 + i]; q[8 + i] = lane1[i] ^ cbi; lane1[i] = cbi; }
+        }
+        memcpy(msg_buf, lane0, (ct_len > 8 ? 8 : ct_len));
+        if (ct_len > 8) memcpy(msg_buf + 8, lane1, ct_len - 8);
+        *msg_len = ct_len;
+        ascon_secure_wipe(lane0, sizeof(lane0));
+        ascon_secure_wipe(lane1, sizeof(lane1));
+    }
+}
+
+static void aead_decrypt_final_r16(ascon_state_t* st, const uint8_t* key, uint8_t* msg_buf, size_t* msg_len) {
+    if (*msg_len) {
+        uint8_t lane0[8] = {0}; uint8_t lane1[8] = {0};
+        if (*msg_len <= 8) {
+            memcpy(lane0, msg_buf, *msg_len); lane0[*msg_len] ^= 0x80;
+        } else {
+            memcpy(lane0, msg_buf, 8);
+            size_t r2 = *msg_len - 8; memcpy(lane1, msg_buf + 8, r2); lane1[r2] ^= 0x80;
+        }
+        st->x[0] = load64_be(lane0); st->x[1] = load64_be(lane1);
+        ascon_secure_wipe(lane0, sizeof(lane0)); ascon_secure_wipe(lane1, sizeof(lane1));
+        *msg_len = 0;
+    }
+    (void)key;
+}
+
+// -------- ASCON-128 (rate=8) streaming API --------
+void ascon128_ctx_init(ascon128_ctx* ctx, const uint8_t key[ASCON_KEY_BYTES], const uint8_t nonce[ASCON_NONCE_BYTES]) {
+    if (!ctx || !key || !nonce) return;
+    memcpy(ctx->key, key, ASCON_KEY_BYTES);
+    ascon_init(&ctx->st, key, nonce);
+    ctx->ad_len = 0; ctx->msg_len = 0; ctx->ad_finalized = 0;
+}
+
+void ascon128_absorb_ad_update(ascon128_ctx* ctx, const uint8_t* ad, size_t ad_len) {
+    if (!ctx || (!ad && ad_len)) return;
+    aead_absorb_ad_update_r8(&ctx->st, ctx->ad_buf, &ctx->ad_len, ad, ad_len, ASCON_PB_ROUNDS);
+}
+
+void ascon128_absorb_ad_finalize(ascon128_ctx* ctx) {
+    if (!ctx || ctx->ad_finalized) return;
+    aead_absorb_ad_finalize_r8(&ctx->st, ctx->ad_buf, &ctx->ad_len, ASCON_PB_ROUNDS);
+    ctx->ad_finalized = 1;
+}
+
+void ascon128_encrypt_update(ascon128_ctx* ctx, const uint8_t* pt, size_t pt_len, uint8_t* ct) {
+    if (!ctx || (!pt && pt_len) || (!ct && pt_len)) return;
+    if (!ctx->ad_finalized) ascon128_absorb_ad_finalize(ctx);
+    aead_encrypt_update_r8(&ctx->st, ctx->msg_buf, &ctx->msg_len, pt, pt_len, ct, ASCON_PB_ROUNDS);
+}
+
+void ascon128_encrypt_final(ascon128_ctx* ctx, uint8_t tag[ASCON_TAG_BYTES]) {
+    if (!ctx || !tag) return;
+    if (!ctx->ad_finalized) ascon128_absorb_ad_finalize(ctx);
+    aead_encrypt_final_r8(&ctx->st, ctx->key, ctx->msg_buf, &ctx->msg_len, tag);
+    ascon_secure_wipe(ctx, sizeof(*ctx));
+}
+
+void ascon128_decrypt_update(ascon128_ctx* ctx, const uint8_t* ct, size_t ct_len, uint8_t* pt) {
+    if (!ctx || (!ct && ct_len) || (!pt && ct_len)) return;
+    if (!ctx->ad_finalized) ascon128_absorb_ad_finalize(ctx);
+    aead_decrypt_update_r8(&ctx->st, ctx->msg_buf, &ctx->msg_len, ct, ct_len, pt, ASCON_PB_ROUNDS);
+}
+
+int ascon128_decrypt_final(ascon128_ctx* ctx, const uint8_t tag[ASCON_TAG_BYTES]) {
+    if (!ctx || !tag) return -2;
+    if (!ctx->ad_finalized) ascon128_absorb_ad_finalize(ctx);
+    aead_decrypt_final_r8(&ctx->st, ctx->key, ctx->msg_buf, &ctx->msg_len);
+    uint8_t calc[ASCON_TAG_BYTES];
+    ascon_finalize(&ctx->st, ctx->key, calc);
+    int neq = ascon_ct_compare(calc, tag, ASCON_TAG_BYTES);
+    ascon_secure_wipe(calc, sizeof(calc));
+    int rc = (neq == 0) ? 0 : -1;
+    ascon_secure_wipe(ctx, sizeof(*ctx));
+    return rc;
+}
+
+// -------- ASCON-128a (rate=16) streaming API --------
+void ascon128a_ctx_init(ascon128a_ctx* ctx, const uint8_t key[ASCON_KEY_BYTES], const uint8_t nonce[ASCON_NONCE_BYTES]) {
+    if (!ctx || !key || !nonce) return;
+    memcpy(ctx->key, key, ASCON_KEY_BYTES);
+    ascon128a_init(&ctx->st, key, nonce);
+    ctx->ad_len = 0; ctx->msg_len = 0; ctx->ad_finalized = 0;
+}
+
+void ascon128a_absorb_ad_update(ascon128a_ctx* ctx, const uint8_t* ad, size_t ad_len) {
+    if (!ctx || (!ad && ad_len)) return;
+    aead_absorb_ad_update_r16(&ctx->st, ctx->ad_buf, &ctx->ad_len, ad, ad_len, ASCON128A_PB_ROUNDS);
+}
+
+void ascon128a_absorb_ad_finalize(ascon128a_ctx* ctx) {
+    if (!ctx || ctx->ad_finalized) return;
+    aead_absorb_ad_finalize_r16(&ctx->st, ctx->ad_buf, &ctx->ad_len, ASCON128A_PB_ROUNDS);
+    ctx->ad_finalized = 1;
+}
+
+void ascon128a_encrypt_update(ascon128a_ctx* ctx, const uint8_t* pt, size_t pt_len, uint8_t* ct) {
+    if (!ctx || (!pt && pt_len) || (!ct && pt_len)) return;
+    if (!ctx->ad_finalized) ascon128a_absorb_ad_finalize(ctx);
+    aead_encrypt_update_r16(&ctx->st, ctx->msg_buf, &ctx->msg_len, pt, pt_len, ct, ASCON128A_PB_ROUNDS);
+}
+
+void ascon128a_encrypt_final(ascon128a_ctx* ctx, uint8_t tag[ASCON_TAG_BYTES]) {
+    if (!ctx || !tag) return;
+    if (!ctx->ad_finalized) ascon128a_absorb_ad_finalize(ctx);
+    aead_encrypt_final_r16(&ctx->st, ctx->key, ctx->msg_buf, &ctx->msg_len, tag);
+    ascon_secure_wipe(ctx, sizeof(*ctx));
+}
+
+void ascon128a_decrypt_update(ascon128a_ctx* ctx, const uint8_t* ct, size_t ct_len, uint8_t* pt) {
+    if (!ctx || (!ct && ct_len) || (!pt && ct_len)) return;
+    if (!ctx->ad_finalized) ascon128a_absorb_ad_finalize(ctx);
+    aead_decrypt_update_r16(&ctx->st, ctx->msg_buf, &ctx->msg_len, ct, ct_len, pt, ASCON128A_PB_ROUNDS);
+}
+
+int ascon128a_decrypt_final(ascon128a_ctx* ctx, const uint8_t tag[ASCON_TAG_BYTES]) {
+    if (!ctx || !tag) return -2;
+    if (!ctx->ad_finalized) ascon128a_absorb_ad_finalize(ctx);
+    aead_decrypt_final_r16(&ctx->st, ctx->key, ctx->msg_buf, &ctx->msg_len);
+    uint8_t calc[ASCON_TAG_BYTES];
+    ascon_finalize(&ctx->st, ctx->key, calc);
+    int neq = ascon_ct_compare(calc, tag, ASCON_TAG_BYTES);
+    ascon_secure_wipe(calc, sizeof(calc));
+    int rc = (neq == 0) ? 0 : -1;
+    ascon_secure_wipe(ctx, sizeof(*ctx));
+    return rc;
+}
+
+// -------- ASCON-80pq (rate=8) streaming API --------
+void ascon80pq_ctx_init(ascon80pq_ctx* ctx, const uint8_t key[20], const uint8_t nonce[ASCON_NONCE_BYTES]) {
+    if (!ctx || !key || !nonce) return;
+    memcpy(ctx->key, key, 20);
+    ascon80pq_init(&ctx->st, key, nonce);
+    ctx->ad_len = 0; ctx->msg_len = 0; ctx->ad_finalized = 0;
+}
+
+void ascon80pq_absorb_ad_update(ascon80pq_ctx* ctx, const uint8_t* ad, size_t ad_len) {
+    if (!ctx || (!ad && ad_len)) return;
+    aead_absorb_ad_update_r8(&ctx->st, ctx->ad_buf, &ctx->ad_len, ad, ad_len, ASCON80PQ_PB_ROUNDS);
+}
+
+void ascon80pq_absorb_ad_finalize(ascon80pq_ctx* ctx) {
+    if (!ctx || ctx->ad_finalized) return;
+    aead_absorb_ad_finalize_r8(&ctx->st, ctx->ad_buf, &ctx->ad_len, ASCON80PQ_PB_ROUNDS);
+    ctx->ad_finalized = 1;
+}
+
+void ascon80pq_encrypt_update(ascon80pq_ctx* ctx, const uint8_t* pt, size_t pt_len, uint8_t* ct) {
+    if (!ctx || (!pt && pt_len) || (!ct && pt_len)) return;
+    if (!ctx->ad_finalized) ascon80pq_absorb_ad_finalize(ctx);
+    aead_encrypt_update_r8(&ctx->st, ctx->msg_buf, &ctx->msg_len, pt, pt_len, ct, ASCON80PQ_PB_ROUNDS);
+}
+
+void ascon80pq_encrypt_final(ascon80pq_ctx* ctx, uint8_t tag[ASCON_TAG_BYTES]) {
+    if (!ctx || !tag) return;
+    if (!ctx->ad_finalized) ascon80pq_absorb_ad_finalize(ctx);
+    aead_encrypt_final_r8(&ctx->st, ctx->key, ctx->msg_buf, &ctx->msg_len, tag);
+    ascon_secure_wipe(ctx, sizeof(*ctx));
+}
+
+void ascon80pq_decrypt_update(ascon80pq_ctx* ctx, const uint8_t* ct, size_t ct_len, uint8_t* pt) {
+    if (!ctx || (!ct && ct_len) || (!pt && ct_len)) return;
+    if (!ctx->ad_finalized) ascon80pq_absorb_ad_finalize(ctx);
+    aead_decrypt_update_r8(&ctx->st, ctx->msg_buf, &ctx->msg_len, ct, ct_len, pt, ASCON80PQ_PB_ROUNDS);
+}
+
+int ascon80pq_decrypt_final(ascon80pq_ctx* ctx, const uint8_t tag[ASCON_TAG_BYTES]) {
+    if (!ctx || !tag) return -2;
+    if (!ctx->ad_finalized) ascon80pq_absorb_ad_finalize(ctx);
+    aead_decrypt_final_r8(&ctx->st, ctx->key, ctx->msg_buf, &ctx->msg_len);
+    uint8_t calc[ASCON_TAG_BYTES];
+    ascon80pq_finalize(&ctx->st, ctx->key, calc);
+    int neq = ascon_ct_compare(calc, tag, ASCON_TAG_BYTES);
+    ascon_secure_wipe(calc, sizeof(calc));
+    int rc = (neq == 0) ? 0 : -1;
+    ascon_secure_wipe(ctx, sizeof(*ctx));
+    return rc;
+}

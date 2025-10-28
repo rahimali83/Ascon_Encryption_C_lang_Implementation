@@ -79,3 +79,97 @@ int ascon_xof(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len) {
 int ascon_xofa(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len) {
     return ascon_xof_core(ASCON_XOFA_IV, in, in_len, out, out_len);
 }
+
+
+// Streaming XOF implementation
+static void ascon_xof_init_common(ascon_xof_ctx* ctx, int variant_a) {
+    if (!ctx) return;
+    ctx->variant_a = variant_a ? 1 : 0;
+    ctx->st.x[0] = variant_a ? ASCON_XOFA_IV : ASCON_XOF_IV;
+    ctx->st.x[1] = 0; ctx->st.x[2] = 0; ctx->st.x[3] = 0; ctx->st.x[4] = 0;
+    ascon_permute(&ctx->st, ASCON_XOF_ROUNDS);
+    ctx->buf_len = 0;
+    ctx->absorbed_final = 0;
+}
+
+void ascon_xof_init(ascon_xof_ctx* ctx) {
+    ascon_xof_init_common(ctx, 0);
+}
+
+void ascon_xofa_init(ascon_xof_ctx* ctx) {
+    ascon_xof_init_common(ctx, 1);
+}
+
+void ascon_xof_absorb(ascon_xof_ctx* ctx, const uint8_t* in, size_t in_len) {
+    if (!ctx || ctx->absorbed_final) return;
+    if (!in && in_len) return;
+    const size_t RATE = (size_t)ASCON_XOF_RATE;
+    const uint8_t* p = in;
+
+    // Fill any partial buffer first
+    if (ctx->buf_len) {
+        size_t need = RATE - ctx->buf_len;
+        size_t take = (in_len < need) ? in_len : need;
+        if (take) {
+            memcpy(ctx->buf + ctx->buf_len, p, take);
+            ctx->buf_len += take;
+            p += take; in_len -= take;
+        }
+        if (ctx->buf_len == RATE) {
+            uint64_t lane = ascon_load64(ctx->buf);
+            ctx->st.x[0] ^= lane;
+            ascon_permute(&ctx->st, ASCON_XOF_ROUNDS);
+            ctx->buf_len = 0;
+        }
+    }
+
+    // Absorb full blocks
+    while (in_len >= RATE) {
+        uint64_t lane = ascon_load64(p);
+        ctx->st.x[0] ^= lane;
+        ascon_permute(&ctx->st, ASCON_XOF_ROUNDS);
+        p += RATE; in_len -= RATE;
+    }
+
+    // Buffer the tail
+    if (in_len) {
+        memcpy(ctx->buf + ctx->buf_len, p, in_len);
+        ctx->buf_len += in_len;
+    }
+}
+
+void ascon_xof_finalize(ascon_xof_ctx* ctx) {
+    if (!ctx || ctx->absorbed_final) return;
+    const size_t RATE = (size_t)ASCON_XOF_RATE;
+    uint8_t last[ASCON_XOF_RATE] = {0};
+    if (ctx->buf_len) memcpy(last, ctx->buf, ctx->buf_len);
+    last[ctx->buf_len] = 0x80;
+    uint64_t lane = ascon_load64(last);
+    ctx->st.x[0] ^= lane;
+    ascon_permute(&ctx->st, ASCON_XOF_ROUNDS);
+    ctx->buf_len = 0;
+    ctx->absorbed_final = 1;
+}
+
+void ascon_xof_squeeze(ascon_xof_ctx* ctx, uint8_t* out, size_t out_len) {
+    if (!ctx || (!out && out_len)) return;
+    if (!ctx->absorbed_final) ascon_xof_finalize(ctx);
+    const size_t RATE = (size_t)ASCON_XOF_RATE;
+    uint8_t* q = out;
+
+    // Full blocks
+    while (out_len >= RATE) {
+        ascon_store64(q, ctx->st.x[0]);
+        ascon_permute(&ctx->st, ASCON_XOF_ROUNDS);
+        q += RATE; out_len -= RATE;
+    }
+
+    // Remainder
+    if (out_len) {
+        uint8_t tmp[ASCON_XOF_RATE];
+        ascon_store64(tmp, ctx->st.x[0]);
+        memcpy(q, tmp, out_len);
+        ascon_secure_wipe(tmp, sizeof(tmp));
+        // Do not permute after partial squeeze; next squeeze continues from same state
+    }
+}
