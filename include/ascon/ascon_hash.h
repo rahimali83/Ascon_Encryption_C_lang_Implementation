@@ -28,6 +28,11 @@ extern "C" {
 #endif
 
 // One-shot APIs produce 32-byte digest for HASH/HASHa/HASH256
+// Parameters:
+//   - msg: pointer to input message bytes (may be NULL only if msg_len == 0)
+//   - msg_len: length in bytes of the input message
+//   - digest: pointer to a 32-byte buffer to receive the digest (must be non-NULL)
+// Return value: none. The digest is written to the provided buffer.
 void ascon_hash256(const uint8_t* msg, size_t msg_len, uint8_t* digest);
 void ascon_hash(const uint8_t* msg, size_t msg_len, uint8_t* digest);
 void ascon_hasha(const uint8_t* msg, size_t msg_len, uint8_t* digest);

@@ -29,6 +29,14 @@ extern "C" {
 #endif
 
 // One-shot XOFs: absorb input and squeeze out_len bytes
+// Parameters:
+//   - in: pointer to input bytes (may be NULL only if in_len == 0)
+//   - in_len: length of input in bytes
+//   - out: pointer to output buffer (must be non-NULL if out_len > 0)
+//   - out_len: number of bytes to produce
+// Returns:
+//   - 0 on success
+//   - -2 if arguments are invalid (e.g., out is NULL but out_len > 0)
 int ascon_xof(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len);
 int ascon_xofa(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len);
 
