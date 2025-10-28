@@ -147,13 +147,29 @@ int kat_parse_file(const char* path, kat_record_cb cb, void* user) {
         // Extract value start
         q = eq + 1;
         while (*q == ' ' || *q == '\t') ++q;
-        // Parse hex (empty allowed)
+        // Decide how to parse the value based on field name
+        // Canonicalize name to check for special cases like 'count'
+        char canon_name[64];
+        strncpy(canon_name, namebuf, sizeof(canon_name)-1);
+        canon_name[sizeof(canon_name)-1] = '\0';
+        kat_canonicalize_name(canon_name);
+
         size_t vlen = 0;
-        uint8_t* v = parse_hex(q, &vlen);
-        if (q[0] != '\0' && v == NULL && vlen == 0) {
-            // invalid hex non-empty
-            rc = -2;
-            break;
+        uint8_t* v = NULL;
+        if (strcmp(canon_name, "count") == 0) {
+            // Treat Count as a non-hex informational field; store empty payload
+            v = NULL; vlen = 0;
+        } else {
+            // Parse hex (empty allowed)
+            v = parse_hex(q, &vlen);
+            if (v == NULL && vlen == 0) {
+                // Empty value is valid (zero-length field)
+                // Keep v as NULL with len 0
+            } else if (v == NULL) {
+                // Non-empty but invalid hex → error out
+                rc = -2;
+                break;
+            }
         }
         if (add_field(&rec, namebuf, v, vlen) != 0) { rc = -3; break; }
     }
