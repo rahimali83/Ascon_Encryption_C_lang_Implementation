@@ -770,8 +770,6 @@ static void aead_encrypt_update_r16(ascon_state_t* st, uint8_t* msg_buf, size_t*
         uint8_t lane0[8]; uint8_t lane1[8];
         store64_be(lane0, st->x[0]);
         store64_be(lane1, st->x[1]);
-        size_t first = (*msg_len < 8) ? (8 - *msg_len) : 0; // bytes remaining in first lane before padding region
-        size_t avail0 = 8 - (*msg_len > 8 ? 8 : *msg_len);
         size_t need = RATE - *msg_len;
         size_t take = (pt_len < need) ? pt_len : need;
         for (size_t i = 0; i < take && (*msg_len + i) < 8; ++i) {
