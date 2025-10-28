@@ -81,3 +81,18 @@ void ascon_hasha_final(ascon_hasha_ctx* ctx, uint8_t out[32]);
 #endif
 
 #endif // ASCON_HASH_H
+
+// -----------------------------------------------------------------------------
+// Streaming API notes (Hash/Hasha/Hash256)
+//
+// All streaming hash functions in this header follow the same pattern:
+//   - init(ctx)
+//   - update(ctx, data, len) [can be called many times; accepts len=0]
+//   - final(ctx, out32)
+// Behavior:
+//   - Rate is 8 bytes; 10* padding is applied once in final().
+//   - After final(), the context is securely wiped and must not be reused.
+//   - update(ctx, NULL, len>0) is ignored (treated as invalid args, no-op).
+// Return codes:
+//   - Hash functions are void and write the 32-byte digest to the provided buffer.
+// -----------------------------------------------------------------------------
