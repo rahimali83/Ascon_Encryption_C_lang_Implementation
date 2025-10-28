@@ -65,18 +65,20 @@ static void ascon_absorb_ad(ascon_state_t* s, const uint8_t* ad, size_t ad_len) 
         s->x[0] ^= lane;
         ascon_permute(s, ASCON_PB_ROUNDS);
     }
-    // Final partial block with 10* padding in byte domain
+    // Final partial block with 10* padding in byte domain (only if remainder present)
     size_t rem = ad_len % ASCON_AEAD_RATE;
-    uint8_t tmp[ASCON_AEAD_RATE] = {0};
-    if (rem) memcpy(tmp, ad + blocks * ASCON_AEAD_RATE, rem);
-    tmp[rem] = 0x80;
-    uint64_t lane = load64_be(tmp);
-    s->x[0] ^= lane;
-    ascon_permute(s, ASCON_PB_ROUNDS);
+    if (rem) {
+        uint8_t tmp[ASCON_AEAD_RATE] = {0};
+        memcpy(tmp, ad + blocks * ASCON_AEAD_RATE, rem);
+        tmp[rem] = 0x80;
+        uint64_t lane = load64_be(tmp);
+        s->x[0] ^= lane;
+        ascon_permute(s, ASCON_PB_ROUNDS);
+        ascon_secure_wipe(tmp, sizeof(tmp));
+    }
 
     // Domain separation
     s->x[4] ^= 1ULL;
-    ascon_secure_wipe(tmp, sizeof(tmp));
 }
 
 static void ascon_encrypt_msg(ascon_state_t* s,
