@@ -120,7 +120,7 @@ Notes:
 
 ## License
 
-Refer to the source file headers for licensing and usage terms. If unsure, contact the project owner before redistribution or commercial use.
+This project is licensed under the MIT License. See the `LICENSE` file at the repository root for full text.
 
 ## Streaming APIs (Hash and XOF)
 
