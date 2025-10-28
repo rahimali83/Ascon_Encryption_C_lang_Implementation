@@ -52,19 +52,28 @@ static void usage(const char* prog) {
             "    %s hash --text <string>\n"
             "    %s hash --file <path>\n"
             "    %s hasha --text <string>\n"
-            "    %s hasha --file <path>\n\n"
+            "    %s hasha --file <path>\n"
+            "    %s hash256-stream --text <string> [--chunksize <n>]\n"
+            "    %s hash256-stream --file <path>   [--chunksize <n>]\n\n"
             "  XOF (arbitrary output length):\n"
             "    %s xof  --text <string> --outlen <bytes>\n"
             "    %s xof  --file <path>   --outlen <bytes>\n"
             "    %s xofa --text <string> --outlen <bytes>\n"
-            "    %s xofa --file <path>   --outlen <bytes>\n\n"
+            "    %s xofa --file <path>   --outlen <bytes>\n"
+            "    %s xof-stream  --text <string> --outlen <bytes> [--chunksize <n>]\n"
+            "    %s xof-stream  --file <path>   --outlen <bytes> [--chunksize <n>]\n"
+            "    %s xofa-stream --text <string> --outlen <bytes> [--chunksize <n>]\n"
+            "    %s xofa-stream --file <path>   --outlen <bytes> [--chunksize <n>]\n\n"
             "  AEAD (ASCON-128):\n"
             "    %s aead-128 encrypt --key <hex16B> --nonce <hex16B> --ad <hex|@file|empty> --in <hex|@file>\n"
             "    %s aead-128 decrypt --key <hex16B> --nonce <hex16B> --ad <hex|@file|empty> --in <hex|@file> --tag <hex16B>\n\n"
             "Notes:\n"
             "  - Hex arguments may be given as @path to use raw file bytes instead of hex.\n"
+            "  - Streaming demos show chunked absorb and multi-call squeeze.\n"
             "  - AEAD prints hex on stdout: for encrypt -> ciphertext + newline + tag; for decrypt -> plaintext.\n",
             prog, prog, prog, prog, prog, prog,
+            prog, prog,
+            prog, prog, prog, prog,
             prog, prog, prog, prog,
             prog, prog);
 }
@@ -125,6 +134,38 @@ int main(int argc, char** argv) {
 
     const char* op = argv[1];
 
+    // Hash256 streaming demo
+    if (strcmp(op, "hash256-stream") == 0) {
+        if (argc < 4) { usage(argv[0]); return 1; }
+        const uint8_t* msg = NULL; size_t len = 0; uint8_t* heap = NULL;
+        size_t chunksz = 8; // default chunk size
+        // Parse args
+        if (strcmp(argv[2], "--text") == 0 && argc >= 4) {
+            msg = (const uint8_t*)argv[3]; len = strlen(argv[3]);
+        } else if (strcmp(argv[2], "--file") == 0 && argc >= 4) {
+            if (read_file(argv[3], &heap, &len) != 0) { fprintf(stderr, "Failed to read file: %s\n", argv[3]); return 2; }
+            msg = heap;
+        } else { usage(argv[0]); return 1; }
+        for (int i = 4; i < argc; ++i) {
+            if (strcmp(argv[i], "--chunksize") == 0 && i + 1 < argc) {
+                size_t v = 0; if (parse_size_t(argv[++i], &v) != 0 || v == 0) { fprintf(stderr, "Invalid chunksize\n"); if (heap) { ascon_secure_wipe(heap, len); free(heap);} return 1; }
+                chunksz = v;
+            }
+        }
+        ascon_hash256_ctx ctx; uint8_t out[32];
+        ascon_hash256_init(&ctx);
+        size_t off = 0;
+        while (off < len) {
+            size_t take = (len - off < chunksz) ? (len - off) : chunksz;
+            ascon_hash256_update(&ctx, msg + off, take);
+            off += take;
+        }
+        ascon_hash256_final(&ctx, out);
+        print_hex(out, sizeof(out)); printf("\n");
+        if (heap) { ascon_secure_wipe(heap, len); free(heap);} 
+        return 0;
+    }
+
     // Hash256
     if (strcmp(op, "hash256") == 0) {
         if (argc < 4) { usage(argv[0]); return 1; }
@@ -167,6 +208,50 @@ int main(int argc, char** argv) {
         else ascon_hasha(msg, len, digest);
         print_hex(digest, sizeof(digest)); printf("\n");
         if (heap) { ascon_secure_wipe(heap, len); free(heap); }
+        return 0;
+    }
+
+    // XOF streaming demos
+    if (strcmp(op, "xof-stream") == 0 || strcmp(op, "xofa-stream") == 0) {
+        if (argc < 6) { usage(argv[0]); return 1; }
+        const uint8_t* in = NULL; size_t in_len = 0; uint8_t* heap = NULL;
+        size_t outlen = 0; size_t chunksz = 8; int have_in = 0; int have_outlen = 0;
+        for (int i = 2; i < argc; ++i) {
+            if (strcmp(argv[i], "--text") == 0 && i + 1 < argc) {
+                in = (const uint8_t*)argv[++i]; in_len = strlen((const char*)in); have_in = 1;
+            } else if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+                if (read_file(argv[++i], &heap, &in_len) != 0) { fprintf(stderr, "Failed to read file\n"); return 2; }
+                in = heap; have_in = 1;
+            } else if (strcmp(argv[i], "--outlen") == 0 && i + 1 < argc) {
+                if (parse_size_t(argv[++i], &outlen) != 0) { fprintf(stderr, "Invalid outlen\n"); if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} return 1; }
+                have_outlen = 1;
+            } else if (strcmp(argv[i], "--chunksize") == 0 && i + 1 < argc) {
+                if (parse_size_t(argv[++i], &chunksz) != 0 || chunksz == 0) { fprintf(stderr, "Invalid chunksize\n"); if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} return 1; }
+            }
+        }
+        if (!have_in || !have_outlen) { usage(argv[0]); if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} return 1; }
+        ascon_xof_ctx ctx;
+        if (strcmp(op, "xof-stream") == 0) ascon_xof_init(&ctx); else ascon_xofa_init(&ctx);
+        // absorb in chunks
+        size_t off = 0;
+        while (off < in_len) {
+            size_t take = (in_len - off < chunksz) ? (in_len - off) : chunksz;
+            ascon_xof_absorb(&ctx, in + off, take);
+            off += take;
+        }
+        // finalize and squeeze in chunks
+        ascon_xof_finalize(&ctx);
+        uint8_t* out = (uint8_t*)malloc(outlen);
+        if (!out) { fprintf(stderr, "OOM\n"); if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} return 3; }
+        size_t remaining = outlen; size_t out_off = 0;
+        while (remaining) {
+            size_t take = (remaining < chunksz) ? remaining : chunksz;
+            ascon_xof_squeeze(&ctx, out + out_off, take);
+            out_off += take; remaining -= take;
+        }
+        print_hex(out, outlen); printf("\n");
+        ascon_secure_wipe(out, outlen); free(out);
+        if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} 
         return 0;
     }
 

@@ -34,18 +34,22 @@ if (BUILD_TESTING)
     add_executable(test_hash tests/test_hash.c)
     target_link_libraries(test_hash PRIVATE ascon)
     add_test(NAME ascon_hash256_basic COMMAND test_hash)
+    set_tests_properties(ascon_hash256_basic PROPERTIES LABELS "non_kat")
 
     add_executable(test_aead128 tests/test_aead128.c)
     target_link_libraries(test_aead128 PRIVATE ascon)
     add_test(NAME ascon128_roundtrip_and_negative COMMAND test_aead128)
+    set_tests_properties(ascon128_roundtrip_and_negative PROPERTIES LABELS "non_kat")
 
     add_executable(test_xof tests/test_xof.c)
     target_link_libraries(test_xof PRIVATE ascon)
     add_test(NAME ascon_xof_behavior COMMAND test_xof)
+    set_tests_properties(ascon_xof_behavior PROPERTIES LABELS "non_kat")
 
     add_executable(test_aead128a tests/test_aead128a.c)
     target_link_libraries(test_aead128a PRIVATE ascon)
     add_test(NAME ascon128a_roundtrip_and_negative COMMAND test_aead128a)
+    set_tests_properties(ascon128a_roundtrip_and_negative PROPERTIES LABELS "non_kat")
 
     add_executable(test_hash_variants tests/test_hash_variants.c)
     target_link_libraries(test_hash_variants PRIVATE ascon)

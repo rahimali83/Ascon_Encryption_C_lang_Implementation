@@ -122,6 +122,53 @@ Notes:
 
 Refer to the source file headers for licensing and usage terms. If unsure, contact the project owner before redistribution or commercial use.
 
+## Streaming APIs (Hash and XOF)
+
+The library provides streaming (incremental) APIs in addition to one-shot functions.
+
+- Hash-256 streaming (see `include/ascon/ascon_hash.h`):
+```
+ascon_hash256_ctx ctx; uint8_t dig[32];
+ascon_hash256_init(&ctx);
+// absorb in chunks
+ascon_hash256_update(&ctx, part1, len1);
+ascon_hash256_update(&ctx, part2, len2);
+// finalize (applies 10* padding once) and squeeze 32 bytes
+ascon_hash256_final(&ctx, dig);
+```
+
+- XOF/XOFa streaming (see `include/ascon/ascon_xof.h`):
+```
+ascon_xof_ctx xc; uint8_t out[64];
+ascon_xof_init(&xc);           // or ascon_xofa_init(&xc)
+ascon_xof_absorb(&xc, msg, mlen);
+ascon_xof_finalize(&xc);
+ascon_xof_squeeze(&xc, out, 64);  // can be called multiple times
+```
+
+CLI includes simple demos:
+```
+# Streaming Hash-256 (chunk size optional, default 8)
+./cmake-build-debug/Ascon_Hash256 hash256-stream --text "hello" --chunksize 3
+
+# Streaming XOF/XOFa with multi-call squeeze
+./cmake-build-debug/Ascon_Hash256 xof-stream  --text "abc" --outlen 40 --chunksize 5
+./cmake-build-debug/Ascon_Hash256 xofa-stream --text "abc" --outlen 40 --chunksize 5
+```
+
+## Tests (non‑KAT)
+
+Non‑KAT tests can be run individually or via CTest label:
+```
+# Build specific targets
+cmake --build cmake-build-debug --target test_hash test_hash_variants test_xof test_aead128 test_aead128a test_aead80pq
+
+# Run via CTest label
+ctest --test-dir cmake-build-debug -L non_kat -VV
+```
+
+Note on KATs: Official KAT alignment is currently deferred; Hash/Hasha/XOF use placeholder IVs. Once official constants/vectors are provided, enable KAT tests under `tests/vectors/ascon-v1.2/` and re-baseline.
+
 ## References
 
 - Ascon project page: https://ascon.iaik.tugraz.at/
