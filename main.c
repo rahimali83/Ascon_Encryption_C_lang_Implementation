@@ -32,190 +32,257 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include "include/ascon/ascon_hash.h"
+#include "include/ascon/ascon_xof.h"
+#include "include/ascon/ascon_aead.h"
+#include "include/ascon/ascon_common.h"
 
-// --- Constants based on the Ascon specification ---
-// The IV is taken from the provided algorithm image
-const uint64_t ASCON_HASH_IV = 0x0000080100cc0002ULL;
-const int ASCON_RATE = 8; // Rate in bytes (64 bits)
-const int ASCON_PA_ROUNDS = 12;
-
-// Round constants for 12 rounds (moved outside function for efficiency)
-static const uint64_t ROUND_CONSTANTS[12] = {
-    0xf0, 0xe1, 0xd2, 0xc3, 0xb4, 0xa5,
-    0x96, 0x87, 0x78, 0x69, 0x5a, 0x4b
-};
-
-// --- Helper macros ---
-#define ROTATE_RIGHT(x, n) (((x) >> (n)) | ((x) << (64 - (n))))
-
-// Compiler optimization hints
-#if defined(__GNUC__) || defined(__clang__)
-    #define LIKELY(x) __builtin_expect(!!(x), 1)
-    #define UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-    #define LIKELY(x) (x)
-    #define UNLIKELY(x) (x)
-#endif
-
-// Endianness conversion helpers (alignment-safe)
-static inline uint64_t BYTES_TO_U64(const uint8_t* ptr) {
-    uint64_t val;
-    memcpy(&val, ptr, sizeof(val));
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    return __builtin_bswap64(val);
-#else
-    return val;
-#endif
+static void print_hex(const uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; ++i) printf("%02x", data[i]);
 }
 
-static inline uint64_t U64_TO_BYTES(uint64_t val) {
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    return __builtin_bswap64(val);
-#else
-    return val;
-#endif
+static void usage(const char* prog) {
+    fprintf(stderr,
+            "Ascon CLI\n\n"
+            "Usage:\n"
+            "  Hashing (32-byte digest):\n"
+            "    %s hash256 --text <string>\n"
+            "    %s hash256 --file <path>\n"
+            "    %s hash --text <string>\n"
+            "    %s hash --file <path>\n"
+            "    %s hasha --text <string>\n"
+            "    %s hasha --file <path>\n\n"
+            "  XOF (arbitrary output length):\n"
+            "    %s xof  --text <string> --outlen <bytes>\n"
+            "    %s xof  --file <path>   --outlen <bytes>\n"
+            "    %s xofa --text <string> --outlen <bytes>\n"
+            "    %s xofa --file <path>   --outlen <bytes>\n\n"
+            "  AEAD (ASCON-128):\n"
+            "    %s aead-128 encrypt --key <hex16B> --nonce <hex16B> --ad <hex|@file|empty> --in <hex|@file>\n"
+            "    %s aead-128 decrypt --key <hex16B> --nonce <hex16B> --ad <hex|@file|empty> --in <hex|@file> --tag <hex16B>\n\n"
+            "Notes:\n"
+            "  - Hex arguments may be given as @path to use raw file bytes instead of hex.\n"
+            "  - AEAD prints hex on stdout: for encrypt -> ciphertext + newline + tag; for decrypt -> plaintext.\n",
+            prog, prog, prog, prog, prog, prog,
+            prog, prog, prog, prog,
+            prog, prog);
 }
 
-// --- Ascon Permutation State ---
-typedef struct {
-    uint64_t x[5];
-} ascon_state_t;
-
-// --- Function Prototypes ---
-void ascon_print_state(const ascon_state_t* state);
-static inline void ascon_permutation(ascon_state_t* state, int rounds) __attribute__((always_inline));
-void ascon_hash256(const uint8_t* msg, size_t msg_len, uint8_t* digest);
-
-// --- Implementation ---
-
-/**
- * @brief Prints the 320-bit state for debugging purposes.
- * @param state Pointer to the Ascon state.
- */
-void ascon_print_state(const ascon_state_t* state) {
-    printf("  x0: %016lx\n", state->x[0]);
-    printf("  x1: %016lx\n", state->x[1]);
-    printf("  x2: %016lx\n", state->x[2]);
-    printf("  x3: %016lx\n", state->x[3]);
-    printf("  x4: %016lx\n", state->x[4]);
+static int read_file(const char* path, uint8_t** out_buf, size_t* out_len) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return -1; }
+    rewind(f);
+    uint8_t* buf = (uint8_t*)malloc((size_t)sz);
+    if (!buf) { fclose(f); return -1; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (rd != (size_t)sz) { free(buf); return -1; }
+    *out_buf = buf; *out_len = (size_t)sz; return 0;
 }
 
-/**
- * @brief The core Ascon permutation function.
- * @param state Pointer to the 320-bit state to be permuted.
- * @param rounds The number of rounds to perform (e.g., 12).
- */
-static inline void ascon_permutation(ascon_state_t* state, int rounds) {
-    uint64_t x0 = state->x[0], x1 = state->x[1], x2 = state->x[2];
-    uint64_t x3 = state->x[3], x4 = state->x[4];
-
-    for (int i = 12 - rounds; i < 12; ++i) {
-        // --- Add constant ---
-        x2 ^= ROUND_CONSTANTS[i];
-
-        // --- S-box layer (optimized) ---
-        x0 ^= x4; x4 ^= x3; x2 ^= x1;
-        uint64_t t0 = (~x0) & x1;
-        uint64_t t1 = (~x1) & x2;
-        uint64_t t2 = (~x2) & x3;
-        uint64_t t3 = (~x3) & x4;
-        uint64_t t4 = (~x4) & x0;
-        x0 ^= t1; x1 ^= t2; x2 ^= t3; x3 ^= t4; x4 ^= t0;
-        x1 ^= x0; x0 ^= x4; x3 ^= x2; x2 = ~x2;
-
-        // --- Linear diffusion layer ---
-        x0 ^= ROTATE_RIGHT(x0, 19) ^ ROTATE_RIGHT(x0, 28);
-        x1 ^= ROTATE_RIGHT(x1, 61) ^ ROTATE_RIGHT(x1, 39);
-        x2 ^= ROTATE_RIGHT(x2, 1) ^ ROTATE_RIGHT(x2, 6);
-        x3 ^= ROTATE_RIGHT(x3, 10) ^ ROTATE_RIGHT(x3, 17);
-        x4 ^= ROTATE_RIGHT(x4, 7) ^ ROTATE_RIGHT(x4, 41);
-    }
-
-    state->x[0] = x0; state->x[1] = x1; state->x[2] = x2;
-    state->x[3] = x3; state->x[4] = x4;
+static int from_hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
 }
 
-/**
- * @brief Computes the Ascon-Hash256 digest of a message.
- * @param msg Pointer to the input message bytes.
- * @param msg_len Length of the input message in bytes.
- * @param digest Pointer to a 32-byte array where the output digest will be stored.
- */
-void ascon_hash256(const uint8_t* msg, size_t msg_len, uint8_t* digest) {
-    ascon_state_t state = {
-        .x = {ASCON_HASH_IV, 0, 0, 0, 0}
-    };
-
-    ascon_permutation(&state, ASCON_PA_ROUNDS);
-
-    // 2. Absorbing Phase - optimized for aligned access
-    const uint8_t* msg_ptr = msg;
-    size_t blocks = msg_len / ASCON_RATE;
-
-    for (size_t i = 0; i < blocks; ++i) {
-        state.x[0] ^= BYTES_TO_U64(msg_ptr);
-        ascon_permutation(&state, ASCON_PA_ROUNDS);
-        msg_ptr += ASCON_RATE;
+// Parse hex string into a newly malloc'ed buffer. Returns 0 on success.
+// If arg starts with '@', read file bytes instead of parsing hex.
+static int parse_hex_or_file(const char* arg, uint8_t** out, size_t* out_len) {
+    if (!arg || !out || !out_len) return -1;
+    if (arg[0] == '@') {
+        return read_file(arg + 1, out, out_len);
     }
-
-    // Padding the last block
-    // Padding the last block
-    uint64_t last_block = 0;
-    size_t remaining_len = msg_len % ASCON_RATE;
-    if (LIKELY(remaining_len > 0)) {
-        memcpy(&last_block, msg_ptr, remaining_len);
+    size_t n = strlen(arg);
+    if (n % 2 != 0) return -1;
+    uint8_t* buf = (uint8_t*)malloc(n / 2);
+    if (!buf) return -1;
+    for (size_t i = 0; i < n; i += 2) {
+        int hi = from_hex_nibble(arg[i]);
+        int lo = from_hex_nibble(arg[i+1]);
+        if (hi < 0 || lo < 0) { free(buf); return -1; }
+        buf[i/2] = (uint8_t)((hi << 4) | lo);
     }
-    // Append the '1' bit (0x80)
-    ((uint8_t*)&last_block)[remaining_len] = 0x80;
-   state.x[0] ^= BYTES_TO_U64((const uint8_t*)&last_block);
-    ascon_permutation(&state, ASCON_PA_ROUNDS);
-
-    // 3. Squeezing Phase - optimized with endian conversion
-    uint64_t out_val = U64_TO_BYTES(state.x[0]);
-    memcpy(digest, &out_val, 8);
-    ascon_permutation(&state, ASCON_PA_ROUNDS);
-
-    out_val = U64_TO_BYTES(state.x[0]);
-    memcpy(digest + 8, &out_val, 8);
-    ascon_permutation(&state, ASCON_PA_ROUNDS);
-
-    out_val = U64_TO_BYTES(state.x[0]);
-    memcpy(digest + 16, &out_val, 8);
-    ascon_permutation(&state, ASCON_PA_ROUNDS);
-
-    out_val = U64_TO_BYTES(state.x[0]);
-    memcpy(digest + 24, &out_val, 8);
+    *out = buf; *out_len = n / 2; return 0;
 }
 
-
-int main() {
-    // Example: Hashing the empty string ""
-    const uint8_t msg1[] = "";
-    size_t len1 = 0;
-    uint8_t digest1[32];
-
-    ascon_hash256(msg1, len1, digest1);
-
-    printf("Hashing empty string \"\":\n");
-    printf("H = ");
-    for(int i = 0; i < 32; ++i) {
-        printf("%02x", digest1[i]);
-    }
-    printf("\n\n");
-
-    // Example: Hashing "abc"
-    const uint8_t msg2[] = "abc";
-    size_t len2 = 3;
-    uint8_t digest2[32];
-
-    ascon_hash256(msg2, len2, digest2);
-
-    printf("Hashing string \"abc\":\n");
-    printf("H = ");
-    for(int i = 0; i < 32; ++i) {
-        printf("%02x", digest2[i]);
-    }
-    printf("\n");
-
+static int parse_size_t(const char* s, size_t* out) {
+    if (!s || !out) return -1;
+    char* end = NULL;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (!end || *end != '\0') return -1;
+    *out = (size_t)v;
     return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) { usage(argv[0]); return 1; }
+
+    const char* op = argv[1];
+
+    // Hash256
+    if (strcmp(op, "hash256") == 0) {
+        if (argc < 4) { usage(argv[0]); return 1; }
+        const uint8_t* msg = NULL;
+        size_t len = 0;
+        uint8_t* heap = NULL;
+        if (strcmp(argv[2], "--text") == 0 && argc >= 4) {
+            msg = (const uint8_t*)argv[3];
+            len = strlen(argv[3]);
+        } else if (strcmp(argv[2], "--file") == 0 && argc >= 4) {
+            if (read_file(argv[3], &heap, &len) != 0) {
+                fprintf(stderr, "Failed to read file: %s\n", argv[3]);
+                return 2;
+            }
+            msg = heap;
+        } else {
+            usage(argv[0]);
+            return 1;
+        }
+        uint8_t digest[32];
+        ascon_hash256(msg, len, digest);
+        print_hex(digest, sizeof(digest));
+        printf("\n");
+        if (heap) { ascon_secure_wipe(heap, len); free(heap); }
+        return 0;
+    }
+
+    // Hash
+    if (strcmp(op, "hash") == 0 || strcmp(op, "hasha") == 0) {
+        if (argc < 4) { usage(argv[0]); return 1; }
+        const uint8_t* msg = NULL; size_t len = 0; uint8_t* heap = NULL;
+        if (strcmp(argv[2], "--text") == 0 && argc >= 4) {
+            msg = (const uint8_t*)argv[3]; len = strlen(argv[3]);
+        } else if (strcmp(argv[2], "--file") == 0 && argc >= 4) {
+            if (read_file(argv[3], &heap, &len) != 0) { fprintf(stderr, "Failed to read file: %s\n", argv[3]); return 2; }
+            msg = heap;
+        } else { usage(argv[0]); return 1; }
+        uint8_t digest[32];
+        if (strcmp(op, "hash") == 0) ascon_hash(msg, len, digest);
+        else ascon_hasha(msg, len, digest);
+        print_hex(digest, sizeof(digest)); printf("\n");
+        if (heap) { ascon_secure_wipe(heap, len); free(heap); }
+        return 0;
+    }
+
+    // XOF
+    if (strcmp(op, "xof") == 0 || strcmp(op, "xofa") == 0) {
+        if (argc < 6) { usage(argv[0]); return 1; }
+        const uint8_t* in = NULL; size_t in_len = 0; uint8_t* heap = NULL;
+        size_t outlen = 0; int have_in = 0; int have_outlen = 0;
+        for (int i = 2; i < argc; ++i) {
+            if (strcmp(argv[i], "--text") == 0 && i + 1 < argc) {
+                in = (const uint8_t*)argv[++i]; in_len = strlen((const char*)in); have_in = 1;
+            } else if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+                if (read_file(argv[++i], &heap, &in_len) != 0) { fprintf(stderr, "Failed to read file\n"); return 2; }
+                in = heap; have_in = 1;
+            } else if (strcmp(argv[i], "--outlen") == 0 && i + 1 < argc) {
+                if (parse_size_t(argv[++i], &outlen) != 0) { fprintf(stderr, "Invalid outlen\n"); return 1; }
+                have_outlen = 1;
+            }
+        }
+        if (!have_in || !have_outlen) { usage(argv[0]); if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} return 1; }
+        uint8_t* out = (uint8_t*)malloc(outlen);
+        if (!out) { fprintf(stderr, "OOM\n"); if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} return 3; }
+        int rc = (strcmp(op, "xof") == 0) ? ascon_xof(in, in_len, out, outlen)
+                                           : ascon_xofa(in, in_len, out, outlen);
+        if (rc != 0) { fprintf(stderr, "XOF not implemented or error (rc=%d)\n", rc); free(out); if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} return 4; }
+        print_hex(out, outlen); printf("\n");
+        ascon_secure_wipe(out, outlen); free(out);
+        if (heap) { ascon_secure_wipe(heap, in_len); free(heap);} 
+        return 0;
+    }
+
+    // AEAD-128
+    if (strcmp(op, "aead-128") == 0) {
+        if (argc < 3) { usage(argv[0]); return 1; }
+        if (argc >= 3 && strcmp(argv[2], "encrypt") == 0) {
+            const char* key_hex = NULL; const char* nonce_hex = NULL; const char* ad_arg = "empty"; const char* in_arg = NULL;
+            for (int i = 3; i < argc; ++i) {
+                if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) key_hex = argv[++i];
+                else if (strcmp(argv[i], "--nonce") == 0 && i + 1 < argc) nonce_hex = argv[++i];
+                else if (strcmp(argv[i], "--ad") == 0 && i + 1 < argc) ad_arg = argv[++i];
+                else if (strcmp(argv[i], "--in") == 0 && i + 1 < argc) in_arg = argv[++i];
+            }
+            if (!key_hex || !nonce_hex || !in_arg) { usage(argv[0]); return 1; }
+            uint8_t *key=NULL,*nonce=NULL,*ad=NULL,*pt=NULL,*ct=NULL, tag[ASCON_TAG_BYTES];
+            size_t key_len=0, nonce_len=0, ad_len=0, pt_len=0;
+            if (parse_hex_or_file(key_hex, &key, &key_len) != 0 || key_len != ASCON_KEY_BYTES) { fprintf(stderr, "Invalid key\n"); goto aead128_encrypt_fail; }
+            if (parse_hex_or_file(nonce_hex, &nonce, &nonce_len) != 0 || nonce_len != ASCON_NONCE_BYTES) { fprintf(stderr, "Invalid nonce\n"); goto aead128_encrypt_fail; }
+            if (strcmp(ad_arg, "empty") == 0) { ad = NULL; ad_len = 0; }
+            else if (parse_hex_or_file(ad_arg, &ad, &ad_len) != 0) { fprintf(stderr, "Invalid AD\n"); goto aead128_encrypt_fail; }
+            if (parse_hex_or_file(in_arg, &pt, &pt_len) != 0) { fprintf(stderr, "Invalid input\n"); goto aead128_encrypt_fail; }
+            ct = (uint8_t*)malloc(pt_len);
+            if (!ct) { fprintf(stderr, "OOM\n"); goto aead128_encrypt_fail; }
+            {
+                int rc = ascon128_encrypt(key, nonce, ad, ad_len, pt, pt_len, ct, tag);
+                if (rc != 0) { fprintf(stderr, "AEAD-128 encrypt not implemented or error (rc=%d)\n", rc); goto aead128_encrypt_fail; }
+                print_hex(ct, pt_len); printf("\n");
+                print_hex(tag, ASCON_TAG_BYTES); printf("\n");
+            }
+            ascon_secure_wipe(key, key_len); free(key);
+            ascon_secure_wipe(nonce, nonce_len); free(nonce);
+            if (ad) { ascon_secure_wipe(ad, ad_len); free(ad); }
+            ascon_secure_wipe(pt, pt_len); free(pt);
+            ascon_secure_wipe(ct, pt_len); free(ct);
+            return 0;
+        aead128_encrypt_fail:
+            if (key) { ascon_secure_wipe(key, key_len); free(key);} 
+            if (nonce) { ascon_secure_wipe(nonce, nonce_len); free(nonce);} 
+            if (ad) { ascon_secure_wipe(ad, ad_len); free(ad);} 
+            if (pt) { ascon_secure_wipe(pt, pt_len); free(pt);} 
+            if (ct) { ascon_secure_wipe(ct, pt_len); free(ct);} 
+            return 5;
+        } else if (argc >= 3 && strcmp(argv[2], "decrypt") == 0) {
+            const char* key_hex = NULL; const char* nonce_hex = NULL; const char* ad_arg = "empty"; const char* in_arg = NULL; const char* tag_hex = NULL;
+            for (int i = 3; i < argc; ++i) {
+                if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) key_hex = argv[++i];
+                else if (strcmp(argv[i], "--nonce") == 0 && i + 1 < argc) nonce_hex = argv[++i];
+                else if (strcmp(argv[i], "--ad") == 0 && i + 1 < argc) ad_arg = argv[++i];
+                else if (strcmp(argv[i], "--in") == 0 && i + 1 < argc) in_arg = argv[++i];
+                else if (strcmp(argv[i], "--tag") == 0 && i + 1 < argc) tag_hex = argv[++i];
+            }
+            if (!key_hex || !nonce_hex || !in_arg || !tag_hex) { usage(argv[0]); return 1; }
+            uint8_t *key=NULL,*nonce=NULL,*ad=NULL,*ct=NULL,*pt=NULL,*tag=NULL; size_t key_len=0, nonce_len=0, ad_len=0, ct_len=0, tag_len=0;
+            if (parse_hex_or_file(key_hex, &key, &key_len) != 0 || key_len != ASCON_KEY_BYTES) { fprintf(stderr, "Invalid key\n"); goto aead128_decrypt_fail; }
+            if (parse_hex_or_file(nonce_hex, &nonce, &nonce_len) != 0 || nonce_len != ASCON_NONCE_BYTES) { fprintf(stderr, "Invalid nonce\n"); goto aead128_decrypt_fail; }
+            if (strcmp(ad_arg, "empty") == 0) { ad = NULL; ad_len = 0; }
+            else if (parse_hex_or_file(ad_arg, &ad, &ad_len) != 0) { fprintf(stderr, "Invalid AD\n"); goto aead128_decrypt_fail; }
+            if (parse_hex_or_file(in_arg, &ct, &ct_len) != 0) { fprintf(stderr, "Invalid input\n"); goto aead128_decrypt_fail; }
+            if (parse_hex_or_file(tag_hex, &tag, &tag_len) != 0 || tag_len != ASCON_TAG_BYTES) { fprintf(stderr, "Invalid tag\n"); goto aead128_decrypt_fail; }
+            pt = (uint8_t*)malloc(ct_len);
+            if (!pt) { fprintf(stderr, "OOM\n"); goto aead128_decrypt_fail; }
+            {
+                int rc = ascon128_decrypt(key, nonce, ad, ad_len, ct, ct_len, tag, pt);
+                if (rc != 0) { fprintf(stderr, "AEAD-128 decrypt not implemented or error (rc=%d)\n", rc); goto aead128_decrypt_fail; }
+                print_hex(pt, ct_len); printf("\n");
+            }
+            ascon_secure_wipe(key, key_len); free(key);
+            ascon_secure_wipe(nonce, nonce_len); free(nonce);
+            if (ad) { ascon_secure_wipe(ad, ad_len); free(ad); }
+            ascon_secure_wipe(ct, ct_len); free(ct);
+            ascon_secure_wipe(tag, tag_len); free(tag);
+            ascon_secure_wipe(pt, ct_len); free(pt);
+            return 0;
+        aead128_decrypt_fail:
+            if (key) { ascon_secure_wipe(key, key_len); free(key);} 
+            if (nonce) { ascon_secure_wipe(nonce, nonce_len); free(nonce);} 
+            if (ad) { ascon_secure_wipe(ad, ad_len); free(ad);} 
+            if (ct) { ascon_secure_wipe(ct, ct_len); free(ct);} 
+            if (tag) { ascon_secure_wipe(tag, tag_len); free(tag);} 
+            if (pt) { ascon_secure_wipe(pt, ct_len); free(pt);} 
+            return 5;
+        } else {
+            usage(argv[0]);
+            return 1;
+        }
+    }
+
+    usage(argv[0]);
+    return 1;
 }

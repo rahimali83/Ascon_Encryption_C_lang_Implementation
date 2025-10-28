@@ -1,0 +1,75 @@
+// Copyright (c) ${YEAR} Virtuous BPO Software Projects
+//
+//  All rights reserved.
+//
+//  This software and associated documentation files (the "Software") are proprietary to Virtuous BPO Software Projects and are protected by copyright law and international treaty provisions. Unauthorized reproduction or distribution of this Software, or any portion of it, may result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+//
+// RESTRICTED RIGHTS: Use, duplication, or disclosure by the government is subject to restrictions as set forth in subparagraph (c)(1)(ii) of the Rights in Technical Data and Computer Software clause at DFARS 252.227-7013 or subparagraphs (c)(1) and (2) of the Commercial Computer Software-Restricted Rights clause at FAR 52.227-19, as applicable.
+//
+//  * Contact: info@virtuousbpo.com
+//  * Website: www.virtuousbpo.com
+//
+//  * Project: ${PROJECT_NAME}
+//  * File: ${FILE_NAME}
+//  * Created: ${DATE}
+//  * Author: ${USER}
+
+// Ascon-Hash implementations
+// SPDX-License-Identifier: MIT
+#include <string.h>
+#include "../include/ascon/ascon_hash.h"
+#include "../include/ascon/ascon_common.h"
+
+// Generic sponge-based hash helper (32-byte digest)
+static const int ASCON_HASH_RATE = 8; // bytes
+static const int ASCON_HASH_PA_ROUNDS = 12;
+
+static void ascon_hash_core(uint64_t iv, const uint8_t* msg, size_t msg_len, uint8_t* digest) {
+    ascon_state_t st = {{ iv, 0, 0, 0, 0 }};
+
+    ascon_permute(&st, ASCON_HASH_PA_ROUNDS);
+
+    // Absorb full rate-size blocks
+    const uint8_t* p = msg;
+    size_t blocks = msg_len / ASCON_HASH_RATE;
+    for (size_t i = 0; i < blocks; ++i) {
+        uint64_t lane = ascon_load64(p);
+        st.x[0] ^= lane;
+        ascon_permute(&st, ASCON_HASH_PA_ROUNDS);
+        p += ASCON_HASH_RATE;
+    }
+
+    // Pad and absorb final block (10* padding)
+    uint64_t last = 0;
+    size_t rem = msg_len % ASCON_HASH_RATE;
+    if (rem > 0) {
+        memcpy(&last, p, rem);
+    }
+    ((uint8_t*)&last)[rem] = 0x80; // append single 1 bit then zeros in byte terms
+    st.x[0] ^= ascon_load64(&last);
+    ascon_permute(&st, ASCON_HASH_PA_ROUNDS);
+
+    // Squeeze 32 bytes (4 lanes of 8 bytes)
+    uint8_t* out = digest;
+    for (int i = 0; i < 4; ++i) {
+        ascon_store64(out + 8*i, st.x[0]);
+        if (i != 3) ascon_permute(&st, ASCON_HASH_PA_ROUNDS);
+    }
+}
+
+// Provisional IVs (distinct values for domain separation). Replace with official IVs when KATs are added.
+static const uint64_t ASCON_HASH256_IV = 0x0000080100cc0002ULL; // existing IV used in project
+static const uint64_t ASCON_HASH_IV    = 0x0000080100cc0010ULL; // provisional distinct IV
+static const uint64_t ASCON_HASHA_IV   = 0x0000080100cc0011ULL; // provisional distinct IV
+
+void ascon_hash256(const uint8_t* msg, size_t msg_len, uint8_t* digest) {
+    ascon_hash_core(ASCON_HASH256_IV, msg, msg_len, digest);
+}
+
+void ascon_hash(const uint8_t* msg, size_t msg_len, uint8_t* digest) {
+    ascon_hash_core(ASCON_HASH_IV, msg, msg_len, digest);
+}
+
+void ascon_hasha(const uint8_t* msg, size_t msg_len, uint8_t* digest) {
+    ascon_hash_core(ASCON_HASHA_IV, msg, msg_len, digest);
+}
