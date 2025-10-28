@@ -145,3 +145,25 @@ int  ascon80pq_decrypt_final(ascon80pq_ctx* ctx, const uint8_t tag[ASCON_TAG_BYT
 #endif
 
 #endif // ASCON_AEAD_H
+
+// -----------------------------------------------------------------------------
+// Return codes and API notes
+//
+// Unless otherwise stated, AEAD functions in this header use the following
+// convention for return values:
+//   - 0  : success
+//   - -1 : authentication/tag verification failed (for decrypt operations)
+//   - -2 : invalid arguments (e.g., NULL pointer where non-NULL required)
+//
+// One-shot APIs:
+//   - Encrypt variants write ciphertext and a 16-byte tag on success.
+//   - Decrypt variants write plaintext on success; on tag mismatch (-1), the
+//     plaintext buffer (if provided) is wiped.
+//
+// Streaming APIs:
+//   - Call order (per variant):
+//       init → [absorb_ad_update]* → absorb_ad_finalize →
+//         {encrypt_update* → encrypt_final | decrypt_update* → decrypt_final}
+//   - decrypt_final returns 0 on success, -1 on tag mismatch, -2 on invalid args.
+//   - All contexts are securely wiped in final() functions.
+// -----------------------------------------------------------------------------
