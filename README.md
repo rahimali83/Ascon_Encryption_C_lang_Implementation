@@ -1,4 +1,4 @@
-# Ascon_Hash256
+# Ascon_Encryption_C_lang_Implementation
 
 A minimal C implementation and demo of the Ascon-Hash256 function (256-bit hash), organized as a small, self-contained project. Ascon is the NIST Lightweight Cryptography winner for authenticated encryption and hashing. This project focuses on hashing only.
 
