@@ -574,7 +574,6 @@ static void aead_absorb_ad_update_r8(ascon_state_t* st, uint8_t* ad_buf, size_t*
 }
 
 static void aead_absorb_ad_finalize_r8(ascon_state_t* st, uint8_t* ad_buf, size_t* ad_len, int pb_rounds) {
-    const size_t RATE = 8;
     uint8_t tmp[8]; memset(tmp, 0, 8);
     if (*ad_len) memcpy(tmp, ad_buf, *ad_len);
     tmp[*ad_len] = 0x80;
@@ -636,8 +635,7 @@ static void aead_encrypt_update_r8(ascon_state_t* st, uint8_t* msg_buf, size_t* 
 }
 
 static void aead_encrypt_final_r8(ascon_state_t* st, const uint8_t* key, uint8_t* msg_buf, size_t* msg_len,
-                                  uint8_t tag[ASCON_TAG_BYTES]) {
-    const size_t RATE = 8;
+                                   uint8_t tag[ASCON_TAG_BYTES]) {
     if (*msg_len) {
         uint8_t lane_bytes[8]; memset(lane_bytes, 0, 8);
         memcpy(lane_bytes, msg_buf, *msg_len);
@@ -703,7 +701,6 @@ static void aead_decrypt_update_r8(ascon_state_t* st, uint8_t* msg_buf, size_t* 
 }
 
 static void aead_decrypt_final_r8(ascon_state_t* st, const uint8_t* key, uint8_t* msg_buf, size_t* msg_len) {
-    const size_t RATE = 8;
     if (*msg_len) {
         uint8_t lane_bytes[8]; memset(lane_bytes, 0, 8);
         memcpy(lane_bytes, msg_buf, *msg_len);

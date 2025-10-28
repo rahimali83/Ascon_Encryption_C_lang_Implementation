@@ -140,7 +140,6 @@ void ascon_xof_absorb(ascon_xof_ctx* ctx, const uint8_t* in, size_t in_len) {
 
 void ascon_xof_finalize(ascon_xof_ctx* ctx) {
     if (!ctx || ctx->absorbed_final) return;
-    const size_t RATE = (size_t)ASCON_XOF_RATE;
     uint8_t last[ASCON_XOF_RATE] = {0};
     if (ctx->buf_len) memcpy(last, ctx->buf, ctx->buf_len);
     last[ctx->buf_len] = 0x80;
